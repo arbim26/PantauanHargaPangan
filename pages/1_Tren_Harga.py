@@ -14,6 +14,8 @@ ui.setup_page(
 
 f = ui.sidebar_filters()
 df = f["df"]
+df_full = f["df_full"]   # seluruh data komoditas sebelum filter provinsi/tanggal
+komoditas = f["komoditas"]
 
 if df.empty:
     st.warning("Tidak ada data pada filter yang dipilih.")
@@ -79,29 +81,89 @@ with c1:
 
 st.divider()
 
-# ------------------------------------- Moving Average & garis patokan (HET)
-# Bagian ini SELALU memakai data HARIAN (bukan hasil agregasi "freq" di
-# sidebar), supaya Moving Average 7 & 30 hari akurat secara kalender —
-# terlepas dari agregasi Mingguan/Bulanan/Kuartalan yang dipilih pengguna.
-st.subheader("Moving average & garis patokan (HET)")
+# ---------------------------------------------------------------------------
+# Moving Average & garis HET — mengambil HET dari konfigurasi zona di
+# Data Explorer (session_state["het_zona_config"]).
+# ---------------------------------------------------------------------------
+st.subheader("Moving average & garis patokan (HET per Zona)")
+
+# ── Helper warna zona ──────────────────────────────────────────────────────
+ZONA_COLORS_LOCAL = {
+    "Zona 1 — Jawa & Bali":                    "#2A6FB5",
+    "Zona 2 — Sumatera":                       "#2E7D5B",
+    "Zona 3 — Kalimantan":                     "#E07A28",
+    "Zona 4 — Sulawesi":                       "#8B44AC",
+    "Zona 5 — Nusa Tenggara, Maluku & Papua":  "#C0392B",
+}
+
+def _get_het_zona(zona_data: dict, kom: str) -> int:
+    het = zona_data.get("het", {})
+    if isinstance(het, dict):
+        return int(het.get(kom, 0))
+    return int(het) if het else 0  # backward compat format lama
+
+
+# ── Ambil konfigurasi zona dari session_state ──────────────────────────────
+zona_config: dict = st.session_state.get("het_zona_config", {})
+ada_zona_config = bool(zona_config)
+
+# ── Tentukan zona yang RELEVAN berdasarkan provinsi yang dipilih di sidebar ─
+provinsi_dipilih: set = set(f["provinsi"])
+pilih_semua_provinsi: bool = bool(st.session_state.get("all_prov", True))
+
+def _zona_relevan(zona_config: dict, provinsi_dipilih: set) -> dict:
+    """
+    Kembalikan subset zona_config yang memiliki ≥1 provinsi
+    beririsan dengan provinsi_dipilih.
+    Jika pilih_semua_provinsi=True, semua zona dikembalikan apa adanya.
+    """
+    if pilih_semua_provinsi:
+        return zona_config
+    return {
+        zn: zd for zn, zd in zona_config.items()
+        if provinsi_dipilih & set(zd.get("provinsi", []))
+    }
+
+zona_config_relevan = _zona_relevan(zona_config, provinsi_dipilih)
 
 col_het1, col_het2 = st.columns([1, 3])
 with col_het1:
     het_level = st.selectbox(
         "Level pasar", D.LEVEL_ORDER, index=1, key="het_level"
     )
-    het_value = st.number_input(
-        "Harga Eceran Tertinggi / HET (Rp per kg)",
-        min_value=0,
-        value=0,
-        step=500,
-        key="het_value",
-        help="Masukkan 0 untuk menyembunyikan garis patokan.",
-    )
-    st.caption(
-        "Garis merah putus-putus = HET. Titik merah = hari-hari ketika "
-        "harga aktual melewati HET."
-    )
+
+    if not pilih_semua_provinsi:
+        # Tampilkan info zona mana yang aktif berdasarkan filter provinsi
+        zona_nama_relevan = list(zona_config_relevan.keys())
+        if zona_nama_relevan:
+            st.info(
+                f"📍 Provinsi terpilih termasuk dalam **{len(zona_nama_relevan)} zona**: "
+                + ", ".join(z.split("—")[0].strip() for z in zona_nama_relevan)
+                + ". HET zona lain disembunyikan."
+            )
+        else:
+            st.warning("Tidak ada zona yang cocok dengan provinsi yang dipilih.")
+
+    if ada_zona_config:
+        zona_dengan_het = {
+            zn: zd for zn, zd in zona_config_relevan.items()
+            if _get_het_zona(zd, komoditas) > 0
+        }
+        if zona_dengan_het:
+            st.success(
+                f"✅ Menggunakan HET dari **{len(zona_dengan_het)} zona** "
+                f"untuk **{komoditas}**."
+            )
+        else:
+            st.info(
+                f"Belum ada HET zona untuk **{komoditas}**. "
+                "Atur di **Data Explorer → HET per Zona & Komoditas**."
+            )
+    else:
+        st.info(
+            "Konfigurasi zona belum ada. Atur HET di "
+            "**Data Explorer → HET per Zona & Komoditas**."
+        )
 
 daily_het = D.national_series(df, "D")
 daily_het = (
@@ -114,64 +176,81 @@ if daily_het.empty:
     with col_het2:
         st.info(f"Tidak ada data harian untuk level {het_level} pada filter saat ini.")
 else:
-    # Moving Average 7 hari & 30 hari (bukan berbasis periode, tapi hari kalender asli)
-    daily_het["ma7"] = daily_het["harga"].rolling(7, min_periods=1).mean()
+    daily_het["ma7"]  = daily_het["harga"].rolling(7,  min_periods=1).mean()
     daily_het["ma30"] = daily_het["harga"].rolling(30, min_periods=1).mean()
 
     fig_het = go.Figure()
 
-    # Harga harian aktual sebagai konteks (garis tipis abu-abu)
-    fig_het.add_trace(
-        go.Scatter(
-            x=daily_het["tanggal"], y=daily_het["harga"], name="Harga harian",
-            mode="lines", line=dict(color="#d8d4cb", width=1),
-            hovertemplate="%{x|%d %b %Y}<br>Rp%{y:,.0f}<extra>Harian</extra>",
-        )
-    )
-    fig_het.add_trace(
-        go.Scatter(
-            x=daily_het["tanggal"], y=daily_het["ma7"], name="MA 7 hari",
-            mode="lines", line=dict(color=D.LEVEL_COLORS[het_level], width=2.2),
-            hovertemplate="%{x|%d %b %Y}<br>MA7: Rp%{y:,.0f}<extra></extra>",
-        )
-    )
-    fig_het.add_trace(
-        go.Scatter(
-            x=daily_het["tanggal"], y=daily_het["ma30"], name="MA 30 hari",
-            mode="lines", line=dict(color="#2A6FB5", width=2.2, dash="dot"),
-            hovertemplate="%{x|%d %b %Y}<br>MA30: Rp%{y:,.0f}<extra></extra>",
-        )
-    )
+    # Harga harian aktual (abu-abu tipis)
+    fig_het.add_trace(go.Scatter(
+        x=daily_het["tanggal"], y=daily_het["harga"], name="Harga harian",
+        mode="lines", line=dict(color="#d8d4cb", width=1),
+        hovertemplate="%{x|%d %b %Y}<br>Rp%{y:,.0f}<extra>Harian</extra>",
+    ))
+    fig_het.add_trace(go.Scatter(
+        x=daily_het["tanggal"], y=daily_het["ma7"], name="MA 7 hari",
+        mode="lines", line=dict(color=D.LEVEL_COLORS[het_level], width=2.2),
+        hovertemplate="%{x|%d %b %Y}<br>MA7: Rp%{y:,.0f}<extra></extra>",
+    ))
+    fig_het.add_trace(go.Scatter(
+        x=daily_het["tanggal"], y=daily_het["ma30"], name="MA 30 hari",
+        mode="lines", line=dict(color="#2A6FB5", width=2.2, dash="dot"),
+        hovertemplate="%{x|%d %b %Y}<br>MA30: Rp%{y:,.0f}<extra></extra>",
+    ))
 
-    # breach = hari-hari ketika harga aktual > HET (dipakai juga untuk indikator teks di bawah)
-    breach = daily_het.iloc[0:0]
-    if het_value and het_value > 0:
-        breach = daily_het[daily_het["harga"] > het_value]
-        if not breach.empty:
-            # Tandai titik-titik yang melewati HET dengan marker merah
-            fig_het.add_trace(
-                go.Scatter(
-                    x=breach["tanggal"], y=breach["harga"], name="Di atas HET",
-                    mode="markers", marker=dict(color="#c0392b", size=6),
-                    hovertemplate="%{x|%d %b %Y}<br>Rp%{y:,.0f} — di atas HET<extra></extra>",
+    # ── Garis HET per zona ─────────────────────────────────────────────────
+    # Hanya zona yang memiliki ≥1 provinsi dari filter sidebar yang ditampilkan.
+    total_breach_zona: dict[str, int] = {}
+    if ada_zona_config:
+        for zona_nama, zona_data in zona_config_relevan.items():
+            het_val = _get_het_zona(zona_data, komoditas)
+            if het_val <= 0:
+                continue
+
+            prov_zona = zona_data.get("provinsi", [])
+            color = ZONA_COLORS_LOCAL.get(zona_nama, "#6b7280")
+
+            # Hitung breach berdasarkan rata-rata nasional harian untuk level ini
+            breach_days = int((daily_het["harga"] > het_val).sum())
+            total_breach_zona[zona_nama] = breach_days
+
+            if breach_days > 0:
+                breach_df = daily_het[daily_het["harga"] > het_val]
+                fig_het.add_trace(go.Scatter(
+                    x=breach_df["tanggal"],
+                    y=breach_df["harga"],
+                    mode="markers",
+                    marker=dict(color=color, size=5, symbol="x"),
+                    name=f"Breach {zona_nama.split('—')[0].strip()}",
+                    showlegend=False,
+                    hovertemplate=(
+                        f"⚠️ Melewati HET {zona_nama.split('—')[0].strip()}<br>"
+                        f"%{{x|%d %b %Y}}<br>Rp%{{y:,.0f}}<extra></extra>"
+                    ),
+                ))
+                fig_het.add_hrect(
+                    y0=het_val,
+                    y1=max(daily_het["harga"].max(), het_val),
+                    fillcolor=f"rgba(192,57,43,0.04)",
+                    line_width=0,
                 )
-            )
-            # Arsir tipis area di atas HET sebagai indikator visual tambahan
-            fig_het.add_hrect(
-                y0=het_value,
-                y1=max(daily_het["harga"].max(), het_value),
-                fillcolor="rgba(192,57,43,0.06)", line_width=0,
-            )
 
-        # Garis patokan HET: horizontal, putus-putus, merah
-        fig_het.add_hline(
-            y=het_value, line_dash="dash", line_color="#c0392b", line_width=1.6,
-            annotation_text=f"HET: {D.format_rupiah(het_value)}",
-            annotation_position="top left",
-        )
+            fig_het.add_hline(
+                y=het_val,
+                line_dash="dash",
+                line_color=color,
+                line_width=1.6,
+                annotation_text=(
+                    f"HET {zona_nama.split('—')[0].strip()} "
+                    f"({komoditas}): {D.format_rupiah(het_val)}"
+                ),
+                annotation_position="top left",
+                annotation_font_color=color,
+                annotation_font_size=10,
+            )
 
     fig_het.update_layout(
-        height=440, hovermode="x unified", plot_bgcolor="white",
+        height=460, hovermode="x unified", plot_bgcolor="white",
         margin=dict(l=10, r=10, t=30, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
         yaxis=dict(title="Harga (Rp/kg)", gridcolor="#eeece7"),
@@ -180,28 +259,36 @@ else:
     with col_het2:
         st.plotly_chart(fig_het, **ui.STRETCH)
 
-    # Indikator status HET dalam bentuk banner teks (merah jika melanggar hari ini)
-    if het_value and het_value > 0:
+    # ── Banner status per zona ─────────────────────────────────────────────
+    if total_breach_zona:
         harga_terkini = float(daily_het["harga"].iloc[-1])
-        pct_breach = len(breach) / len(daily_het) * 100 if len(daily_het) else 0.0
-        if harga_terkini > het_value:
-            selisih = harga_terkini - het_value
-            st.error(
-                f"⚠️ Harga **{het_level.lower()}** terkini "
-                f"({D.format_rupiah(harga_terkini)}) **melebihi HET** "
-                f"({D.format_rupiah(het_value)}) sebesar "
-                f"{D.format_rupiah(selisih)} ({selisih / het_value * 100:.1f}%). "
-                f"Sepanjang periode terpilih, harga berada di atas HET pada "
-                f"**{len(breach)} dari {len(daily_het)} hari ({pct_breach:.1f}%)**."
-            )
-        else:
-            st.success(
-                f"✅ Harga **{het_level.lower()}** terkini "
-                f"({D.format_rupiah(harga_terkini)}) masih **di bawah HET** "
-                f"({D.format_rupiah(het_value)}). Sepanjang periode terpilih, harga "
-                f"sempat melewati HET pada {len(breach)} dari {len(daily_het)} hari "
-                f"({pct_breach:.1f}%)."
-            )
+        total_hari = len(daily_het)
+        for zona_nama, breach_days in total_breach_zona.items():
+            het_val = _get_het_zona(zona_config_relevan[zona_nama], komoditas)
+            pct = breach_days / total_hari * 100 if total_hari else 0
+            if harga_terkini > het_val:
+                selisih = harga_terkini - het_val
+                st.error(
+                    f"⚠️ **{zona_nama}** — Harga {het_level.lower()} terkini nasional "
+                    f"({D.format_rupiah(harga_terkini)}) **melebihi HET** "
+                    f"({D.format_rupiah(het_val)}) sebesar {D.format_rupiah(selisih)} "
+                    f"({selisih / het_val * 100:.1f}%). "
+                    f"Sepanjang periode: di atas HET **{breach_days} dari {total_hari} hari "
+                    f"({pct:.1f}%)**."
+                )
+            else:
+                st.success(
+                    f"✅ **{zona_nama}** — Harga {het_level.lower()} terkini nasional "
+                    f"({D.format_rupiah(harga_terkini)}) masih **di bawah HET** "
+                    f"({D.format_rupiah(het_val)}). "
+                    f"Sempat melewati HET {breach_days} dari {total_hari} hari ({pct:.1f}%)."
+                )
+
+    if not ada_zona_config:
+        st.caption(
+            "💡 Atur HET di **Data Explorer → HET per Zona & Komoditas** "
+            "agar garis patokan muncul otomatis di sini untuk setiap komoditas."
+        )
 
 st.divider()
 
@@ -233,13 +320,11 @@ else:
     fig2 = go.Figure()
     for p in prov_pick:
         s = resampled[resampled["provinsi"] == p]
-        fig2.add_trace(
-            go.Scatter(
-                x=s["tanggal"], y=s["harga"], name=p, mode="lines",
-                line=dict(width=2),
-                hovertemplate=f"<b>{p}</b><br>%{{x|%b %Y}}<br>Rp%{{y:,.0f}}<extra></extra>",
-            )
-        )
+        fig2.add_trace(go.Scatter(
+            x=s["tanggal"], y=s["harga"], name=p, mode="lines",
+            line=dict(width=2),
+            hovertemplate=f"<b>{p}</b><br>%{{x|%b %Y}}<br>Rp%{{y:,.0f}}<extra></extra>",
+        ))
     fig2.update_layout(
         height=420, hovermode="x unified", plot_bgcolor="white",
         margin=dict(l=10, r=10, t=30, b=10),
@@ -263,16 +348,14 @@ pivot = seasonal.pivot_table(
 nama_bulan = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
 pivot.columns = [nama_bulan[c - 1] for c in pivot.columns]
 
-fig3 = go.Figure(
-    go.Heatmap(
-        z=pivot.values,
-        x=pivot.columns,
-        y=pivot.index.astype(str),
-        colorscale="YlOrRd",
-        hovertemplate="%{y} %{x}<br>Rp%{z:,.0f}<extra></extra>",
-        colorbar=dict(title="Rp/kg"),
-    )
-)
+fig3 = go.Figure(go.Heatmap(
+    z=pivot.values,
+    x=pivot.columns,
+    y=pivot.index.astype(str),
+    colorscale="YlOrRd",
+    hovertemplate="%{y} %{x}<br>Rp%{z:,.0f}<extra></extra>",
+    colorbar=dict(title="Rp/kg"),
+))
 fig3.update_layout(height=300, margin=dict(l=10, r=10, t=20, b=10))
 st.plotly_chart(fig3, **ui.STRETCH)
 
