@@ -8,8 +8,7 @@ from core import ui
 
 ui.setup_page(
     "Tren harga",
-    "Pergerakan harga menurut level pasar, dengan opsi moving average dan "
-    "perbandingan antarprovinsi.",
+    "Pergerakan harga menurut level pasar, dengan perbandingan antarprovinsi.",
 )
 
 f = ui.sidebar_filters()
@@ -23,7 +22,6 @@ if df.empty:
 
 c1, c2 = st.columns([3, 1])
 with c2:
-    ma_window = st.slider("Moving average (periode)", 1, 12, 1, key="ma")
     show_area = st.toggle("Tampilkan rentang antarprovinsi", value=False)
 
 series = D.national_series(df, f["freq"])
@@ -60,7 +58,7 @@ for level in D.LEVEL_ORDER:
     sub = series[series["level"] == level].copy()
     if sub.empty:
         continue
-    y = sub["harga"].rolling(ma_window, min_periods=1).mean() if ma_window > 1 else sub["harga"]
+    y = sub["harga"]
     fig.add_trace(
         go.Scatter(
             x=sub["tanggal"], y=y, name=level, mode="lines",
